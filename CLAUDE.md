@@ -116,7 +116,18 @@ python3 -I work/ocr/mistral_batch.py fetch                          # -> work/.o
 - **Gaps.** There's no UI or settlement tracking yet. About $3.37M stays unverifiable until the missing documents arrive.
 
 ## Risks
-- **Dispute window.** The previous team never looked at it. Carrier agreements usually allow billing disputes for only 60–180 days. Find the clause, and flag each claim as within the window or expired.
+- **Dispute window.** The previous team never looked at it.
+  - Verizon's standard terms are strict. The US Master Terms §2.7 make an invoice binding 6 months after its due date. The EMEA terms allow 6 months from the invoice date, allow withholding payment only for disputes raised within 30 days, and make Verizon's determination final.
+  - EZ's 208686 agreement and its amendments may override these, so find the actual clause.
+  - Flag each claim as within the window or expired. Expired claims still count as renewal leverage.
+- **Verizon's default renewal terms**, which the pack must price, if 208686 doesn't override them:
+  - a shortfall on a volume commitment costs 75%
+  - early termination costs 75% of the remaining monthly charges
+  - some services auto-renew with a 10% uplift
+  - prices can rise on 30 days' notice once a term expires
+  - charges billed more than 6 months late can be credited on request
+
+  Sources and the full request list are in §3.1.4 and §3.3.4 of the playbook.
 - **Missing contracts:** ~$3.37M sits in Tier E. The request list (pack item 6) is how this gets fixed.
 - **OCR misreads:** digits in OCR output are never trusted on their own. Every figure must cross-check against pdftotext or a header total.
 
