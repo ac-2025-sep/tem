@@ -1,0 +1,15 @@
+# Data and outputs live in Google Drive (folder "tem-claude"), never in git
+*.csv
+*.json
+*.jsonl
+*.txt
+*.pdf
+*.zip
+work/.txtcache/
+work/engine_out/
+work/legacy_capture/
+work/fx/
+legacy/
+drive_new/
+__pycache__/
+*.pyc
