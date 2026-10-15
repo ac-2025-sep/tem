@@ -1,6 +1,16 @@
 # TEM — Egon Zehnder (EZ) × Verizon invoice audit
 
-Staqo is replacing EZ's current TEM platform (Presence360). EZ is very unhappy with it because it can't reliably parse or extract their Verizon documents. EZ's financial year is being confirmed: the user said "Nov–Sep", so ask whether that means Oct–Sep or Nov–Oct. **The Verizon contract renewal is due next month.** Scope is Verizon only. Ignore NTT.
+## Goal: this is a rescue project
+- **Presence360 (P360) is Staqo's own TEM product.** An outsourced third-party team started it about 1.5 years ago and botched it. It can't reliably parse or extract EZ's Verizon documents, about 82% of its "overbilled" figure is false, and its UI is poor.
+- **EZ (Egon Zehnder) is the anchor client and is very unhappy.** The end goal is to rebuild P360 properly, with this engine as its core, and win EZ back. This repo is the rescue.
+- The audit work, the renewal pack and the claims exist to prove the rebuilt product on real EZ data. Then that capability goes into P360, including a UI that is up to industry standard (see `docs/research/TEM_INDUSTRY_PLAYBOOK.md`).
+- **The Verizon contract renewal is due next month.** The exact date is unknown, so find it in the contract documents, along with any auto-renewal and notice clauses.
+- EZ's financial year is still to be confirmed. The user said "Nov–Sep", so ask whether that means Oct–Sep or Nov–Oct.
+- Scope is Verizon only. Ignore NTT.
+
+## Open questions and risks
+- **Dispute or claims window.** The previous team never considered this. Most carrier agreements only allow billing disputes within a limited period, often 60–180 days. Find the clause in 208686 and its amendments. Keep every finding, and add a "within dispute window" filter at the claims stage.
+- **Nobody at EZ knows what to ask Verizon for.** We have to produce that request list ourselves: the missing contracts and SOFs, the rate exhibits, the circuit inventory with term end dates, commitment and achievement-credit status, and the dispute history.
 
 ## Where things live
 - **Code:** this repo, branch `ez-verizon-audit`. Code only. Never commit client data (invoices, contract prices, findings, reports with $ figures). `.gitignore` enforces this.
