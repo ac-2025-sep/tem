@@ -3,7 +3,7 @@ Run: python3 -I work/scripts/vz_intl_lines.py   (from TEM dir; needs pdftotext; 
 Writes work/invoice_lines.csv. Reconcile/CSV compare: work/scripts/vz_intl_validate.py"""
 import csv, os, re, subprocess, sys
 from datetime import date
-ROOT = "/media/abhay/Workspace/Egon Zehnder/TEM"
+ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))   # TEM root
 CACHE = f"{ROOT}/work/.txtcache"
 SCOPE = {"VZ_INTL_EN", "VZ_INTL_CN", "VZ_INTL_IT", "VZ_INTL_PAGEOF", "VZ_CA_EC", "VZ_US_EC"}
 MON = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
@@ -197,8 +197,9 @@ def parse_doc(rec, t):
                 cur["period_end"] = pdate(s); continue
             if cur and ln.startswith(" "):
                 mc = re.match(r"^\s*\((\d{5,})/([^)]+)\)\s*$", ln)
-                if mc and not cur["service_id"]:  # service ref wrapped onto its own line
-                    cur["service_id"], cur["contract_ref"] = mc[1], mc[2]; svc, con = mc[1], mc[2]
+                if mc and (not cur["service_id"] or cur["description"].endswith(" -")):  # service ref wrapped onto its own line;
+                    cur["service_id"], cur["contract_ref"] = mc[1], mc[2]; svc, con = mc[1], mc[2]   # "Product -" + wrapped ref must not
+                    cur["service_name"] = sname = cur["description"].strip(" -"); circ = rel = None   # keep the previous service's id
                 else:
                     cur["description"] += " " + s
     flush()
