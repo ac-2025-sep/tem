@@ -13,3 +13,6 @@ legacy/
 drive_new/
 __pycache__/
 *.pyc
+work/.ocrcache/
+work/ocr/batches/
+work/compare/out/
