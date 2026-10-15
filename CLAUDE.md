@@ -8,6 +8,15 @@
 - EZ's financial year is still to be confirmed. The user said "Nov–Sep", so ask whether that means Oct–Sep or Nov–Oct.
 - Scope is Verizon only. Ignore NTT.
 
+## Stakeholders and deadline
+- **EZ has stopped payments and will pull the plug next week (week of 2026-10-19) unless we overdeliver.** Everything is judged against that deadline.
+- **Desh Deepak (procurement)** reviews first. **Manoj (finance)** has the final say. Write deliverables for Desh first (renewal leverage, the Verizon request list, rates) and then for Manoj (money: claims, spend baseline, reconciliation to the cent).
+- **The P360 code is not available to us.** Only the running apps are: UAT https://tem-uat.thepresence360.com/ and live https://tem.thepresence360.com/. The rebuild is effectively greenfield around this engine.
+- **Baseline promises** are on Drive, in the `TEM-dev-workspace` folder:
+  - `Use Case Success Criteria.xlsx`: ≥99% discrepancy detection on 1,000+ lines, reliable PDF/CSV parsing, configurable rules, categorised exceptions, actionable reports, SSO, a 100% audit trail (source file, field origin, rule triggered, timestamp), sign-off by 2 business users, 6 months of history processed within 40 business days, risk register, measurable outcomes.
+  - `Presence 360 test case.csv`: the existing UI flows (dashboard, documents for Amendment/SOF/Invoice/Credit Note, discrepancy popup, location view).
+  - Treat both as the floor, and show a scorecard against each criterion.
+
 ## Open questions and risks
 - **Dispute or claims window.** The previous team never considered this. Most carrier agreements only allow billing disputes within a limited period, often 60–180 days. Find the clause in 208686 and its amendments. Keep every finding, and add a "within dispute window" filter at the claims stage.
 - **Nobody at EZ knows what to ask Verizon for.** We have to produce that request list ourselves: the missing contracts and SOFs, the rate exhibits, the circuit inventory with term end dates, commitment and achievement-credit status, and the dispute history.
