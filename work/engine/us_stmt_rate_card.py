@@ -93,6 +93,43 @@ def build_rates():
     return byspeed
 
 
+CTRY_FIX = {'columbia': 'colombia', 'korea': 'korea, republic of', 'kor': 'korea, republic of',
+            'united arab emirates (trucial st': 'united arab emirates',
+            'germany; federal republic of (we': 'germany'}
+
+
+def circuit_countries():
+    """circuit -> country from the raw statement text (`Orig: CITY, Country` under each `Circuit ID:`; BCBH* from `P#### EGON ZEHNDER INTL - SEOUL, KOR`)."""
+    import re as _re
+    seen = collections.defaultdict(collections.Counter)
+    for r in csv.DictReader(open(os.path.join(HERE, '..', '..', 'analysis', 'billing_index.csv'))):
+        if not r['template'].startswith('VZ_US_STMT_NODE'):
+            continue
+        fp = os.path.join(W, '.txtcache', r['hash'] + '.txt')
+        if not os.path.exists(fp):
+            continue
+        cur, loc = None, None
+        for ln in open(fp, errors='ignore'):
+            h = _re.match(r'^P\d+ EGON ZEHNDER INTL - .*?,\s*([A-Za-z ]+)\s*$', ln)
+            if h:
+                loc = h[1].strip()
+            a = _re.match(r'\s+Circuit ID:\s+(\S+)', ln)
+            if a:
+                cur = a[1]
+                if loc:
+                    seen[cur][loc.lower()] += 1
+                loc = None
+                continue
+            b = _re.match(r'\s+Orig:\s*(.+)', ln)
+            if b and cur:
+                seen[cur][b[1].rsplit(',', 1)[-1].strip().lower()] += 1
+    out = {}
+    for k, v in seen.items():
+        c = v.most_common(1)[0][0]
+        out[k] = R.cn(CTRY_FIX.get(c, c))
+    return out
+
+
 def close(a, b):
     return abs(a - b) <= max(TOL_ABS, abs(b) * TOL_PCT)
 
@@ -104,6 +141,7 @@ def month_of(l):
 def main():
     os.makedirs(OUT, exist_ok=True)
     rates = build_rates()
+    ctry_of = circuit_countries()
     pool = {}
     for r in csv.DictReader(open(os.path.join(OUT, 'service_month_ledger.csv'))):
         if r['kind'] == 'REC' and r['category'].startswith('NO_CONTRACT_REF') and r['service_name'] == 'Private IP':
@@ -164,14 +202,17 @@ def main():
         net = round(gross + disc + pcred, 2)
         fx = float(led['fx_to_usd'] or 1)
         dbp = round(-100 * disc / gross, 2) if gross > 0.005 and disc < 0 else 0.0
+        cc = ctry_of.get(svc)
         cands = rates.get(sp[0], []) if len(sp) == 1 else []
+        if cc and cands:
+            cands = [c for c in cands if R.cn(c['country']) == cc]
         exp, cat, conf, basis, ctry = None, 'RC_NO_RATE', '', '', ''
         if month < EFFECTIVE:
             basis = 'PRE_AMENDMENT_28 service month (old pricebook, not checkable)'
         elif len(sp) != 1:
             basis = f'speed not unambiguous ({sp or "none"})'
         elif not cands:
-            basis = f'no PIP Port rate at {sp[0]} Mbps in Amendment 28'
+            basis = f'no PIP Port rate at {sp[0]} Mbps in Amendment 28' + (f' for {cc}' if cc else '')
         else:
             days = sorted(e['partial'])
             covers = {1.0}
@@ -189,13 +230,13 @@ def main():
             if hit:
                 c, cv = hit
                 same = sorted({x['country'] for x in cands if close(x['net'], c['net'])})
-                ctry = '/'.join(sorted({x['country'] for x in (listhit or cands) if close(x['net'], c['net'])}))
+                ctry = (cc.title() if cc else '/'.join(sorted({x['country'] for x in (listhit or cands) if close(x['net'], c['net'])})))
                 exp = round(c['net'] * cv, 2)
                 cat = 'RC_OK'
-                conf = 'MED' if (c['strict'] and listhit) else 'LOW'
+                conf = ('HIGH' if c['strict'] else 'MED') if cc else ('MED' if (c['strict'] and listhit) else 'LOW')
                 basis = (f"net {net:.2f} = Amend28 {'p.42-43 net' if c['strict'] else 'p.44-48 table'} {c['net']:g}"
                          f"{' x %.4f' % cv if cv != 1 else ''} for {len(same)} country(ies) at {sp[0]} Mbps; "
-                         f"gross {'= list ' + format(listhit[0]['list'], 'g') if listhit else 'no list match'}; country unresolved")
+                         f"gross {'= list ' + format(listhit[0]['list'], 'g') if listhit else 'no list match'}; country " + (cc if cc else 'unresolved'))
             elif pcred < 0 and net <= max(allnets) + TOL_ABS:
                 cat, conf, exp = 'RC_OK', 'LOW', round(net, 2)
                 basis = 'port credited/prorated after disconnect; net not above any Amend28 rate'
@@ -205,7 +246,7 @@ def main():
                 top = max(cands, key=lambda c: c['net'])
                 exp = round(top['net'], 2)
                 cat, conf = 'RC_OVERBILLED', 'LOW'
-                basis = f"net {net:.2f} above the highest Amend28 rate at {sp[0]} Mbps ({top['net']:g} {top['country']}); country unresolved"
+                basis = f"net {net:.2f} above the highest Amend28 rate at {sp[0]} Mbps ({top['net']:g} {top['country']}); country {cc or 'unresolved'}"
             elif net < min(allnets) - TOL_ABS:
                 exp = round(min(allnets), 2)
                 cat, conf = 'RC_UNDERBILLED', 'LOW'
@@ -213,7 +254,7 @@ def main():
             else:
                 basis = f'net {net:.2f} between country rates at {sp[0]} Mbps and matches none; country unresolved'
         rows.append(dict(service_id=svc, month=month, product='PIP Port', tier=(sp[0] + ' Mbps') if len(sp) == 1 else '',
-                         country=ctry, currency=cur, billed=net, expected=exp, discount_billed_pct=dbp if gross > 0 else '',
+                         country=ctry or (cc.title() if cc else ''), currency=cur, billed=net, expected=exp, discount_billed_pct=dbp if gross > 0 else '',
                          discount_contract_pct='', discrepancy=round(net - exp, 2) if exp is not None else '', category=cat,
                          invoices=' '.join(sorted(e['inv'])), billed_gross=gross, discount_label_pct='', confidence=conf,
                          basis=basis, ledger_category=led['category'], fx_to_usd=led['fx_to_usd'], billed_usd=round(net * fx, 2),

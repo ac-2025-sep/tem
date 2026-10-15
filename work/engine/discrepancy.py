@@ -6,7 +6,14 @@ Rules (each verified on real invoices, see work/engine/RULES.md):
   bill in arrears, some accounts bill bi-monthly, and 'CE' catch-up lines back-bill earlier months.
   Every REC/CE line is spread over the days it covers; each service-month total is compared to MRC x coverage.
 - NRCs are billed in instalments, so they are compared cumulatively per service.
-- The contract named on the invoice line wins; otherwise the latest revision that prices that service ID.
+- The contract named on the invoice line wins; otherwise the latest *signed* revision that prices that service ID,
+  never one older than the cited revision (CITED_REVISION_NOT_PROVIDED when the cited revision is missing or lacks the service).
+- CPE landed-cost / pass-through NRCs are summed per (contract, location) and compared with the SOF's service-less
+  location-level 'Landed Costs' row: NRC_PASSTHROUGH (<= SOF) or NRC_PASSTHROUGH_MISMATCH (> SOF, review only).
+- Non-SOF fees (pending order change, cancellation, change fee, TSP) are never priced as install NRC/MRC: FEE_REVIEW,
+  a question for Verizon with no claim. They are kept out of the service-month ledger so they cannot inflate OVERBILLED.
+- NRC_NO_PRICE: the only SOF rows for the service are REMOVED zeros, so 0 is not a price.
+- ESCALATOR_REVIEW also when the overbilling equals k lines x the SOF footnote escalator ('increase every N year(s) of X percent').
 Run from the TEM folder: python3 -I work/engine/discrepancy.py
 """
 import csv, json, glob, os, re, calendar, collections
@@ -76,15 +83,22 @@ def load_prices():
                              act=r.get('activity_type'), mrc=num(r.get('mrc')), nrc=num(r.get('nrc')),
                              cur=r.get('currency'), src=r.get('source_path') or os.path.basename(f),
                              desc=f"{r.get('service_name') or ''} {r.get('text') or ''}"))
-    book, seen = {}, {}
+    book, seen, loc_pass, esc = {}, {}, collections.defaultdict(float), dict(ESCALATOR_SEED)
     for r in rows:
+        m = ESCALATOR.search(r['desc'] or '')
+        if m and r['ref']:
+            esc[r['ref']] = (int(m[1]), float(m[2]) / 100)
         if not r['svc']:
+            # service-less rows are location-level Landed Costs / Shipping: the cap for CPE NRCs at that site
+            sig = (r['ref'], r['loc'], r['desc'], r['nrc'])
+            if r['nrc'] and r['loc'] and PASSTHROUGH.search(r['desc'] or '') and seen.setdefault(sig, r['src']) == r['src']:
+                loc_pass[(r['ref'], r['loc'], r['cur'])] += r['nrc']
             continue
         sig = (r['ref'], str(r['svc']), r['act'], r['mrc'], r['nrc'])
         if seen.setdefault(sig, r['src']) != r['src']:
             continue   # identical row from another copy of the same contract (filed under two names)
         b = book.setdefault((r['ref'], str(r['svc'])),
-                            dict(mrc=0.0, nrc=0.0, disc=0.0, removed=False, usage=False, cur=r['cur'], src=r['src'], loc=r['loc']))
+                            dict(mrc=0.0, nrc=0.0, disc=0.0, comp=collections.Counter(), removed=False, usage=False, cur=r['cur'], src=r['src'], loc=r['loc']))
         b['usage'] |= 'usage' in (r['desc'] or '').lower()
         act = (r['act'] or '').upper()
         if act == 'REMOVED':
@@ -93,24 +107,36 @@ def load_prices():
             b['disc'] += r['mrc'] or 0          # contract discount row, e.g. 'Internet Dedicated Services (60%)' = -786
         else:
             b['mrc'] += r['mrc'] or 0
+            if r['mrc']:
+                b['comp'][r['mrc']] += 1            # component lines, for escalator tests that hit only some lines
             b['nrc'] += r['nrc'] or 0
     by_svc = collections.defaultdict(list)
     for (ref, svc), b in book.items():
         by_svc[svc].append((ref, b))
     for svc in by_svc:
         by_svc[svc].sort(key=lambda t: ref_key(t[0]))
-    return book, by_svc, {r['ref'] for r in rows if r['ref']}
+    return book, by_svc, {r['ref'] for r in rows if r['ref']}, loc_pass, esc
+
+
+def is_signed(src):
+    """ponytail: signature is only visible in the file name; unsigned copies (DocuSign/AdobeSign drafts) sit in 'Missing Document'."""
+    return bool(re.search(r'sign', os.path.basename(src or ''), re.I)) or '/Verizon/' in (src or '') or 'OneDrive' in (src or '')
 
 
 def resolve(ref, svc, book, by_svc, docs):
     """-> (priced_by, price entry or None, reason when unpriced)"""
     if ref and (ref, svc) in book:
         return ref, book[(ref, svc)], ''
-    if by_svc.get(svc) and ref and ref != MASTER_CONTRACT and ref not in docs and ref_key(ref) > ref_key(by_svc[svc][-1][0]):
-        return '', None, 'CITED_REVISION_NOT_PROVIDED'   # invoice cites a newer revision we don't have; older price would mislead
     if by_svc.get(svc):
+        # an older revision of the *cited* contract is stale. When the cited doc is on file but lacks this service, family order is
+        # meaningless (services move between SOFs; blocking all 244 such OK rows would lose coverage), so main() judges: a fallback
+        # that matches the bill is fine, one that doesn't is CITED_REVISION_NOT_PROVIDED. Cited doc absent: block outright.
+        cands = [t for t in by_svc[svc] if not ref or ref == MASTER_CONTRACT or ref_key(t[0])[0] != ref_key(ref)[0] or ref_key(t[0]) >= ref_key(ref)]
+        if not cands or (ref and ref != MASTER_CONTRACT and ref not in docs and ref_key(ref) > ref_key(by_svc[svc][-1][0])):
+            return '', None, 'CITED_REVISION_NOT_PROVIDED'   # invoice cites a newer revision we don't have; older price would mislead
         # ponytail: no effective dates per revision yet; fall back to the latest *non-removing* revision and mark it
-        live = [t for t in by_svc[svc] if not (t[1]['removed'] and t[1]['mrc'] == 0)] or by_svc[svc]
+        live = [t for t in cands if not (t[1]['removed'] and t[1]['mrc'] == 0)] or cands
+        live = [t for t in live if is_signed(t[1]['src'])] or live   # never an unsigned copy when a signed one exists
         return (*live[-1], 'FALLBACK_REVISION')
     if ref == MASTER_CONTRACT:
         return '', None, 'MASTER_RATE_CARD'          # priced off master-agreement rate cards, not a per-service SOF
@@ -136,6 +162,11 @@ def load_lines():
 
 
 PASSTHROUGH = re.compile(r'landed cost|import vat|shipping|delivery charge', re.I)
+# fees with no SOF row by nature (order changes, cancellations, priority restoration): a question for Verizon, not an install/MRC check
+FEE = re.compile(r'pending order change|cancellation (fee|-)|change fee|telecommunications service priority', re.I)
+ESCALATOR = re.compile(r'increase every (\d+) year\(?s?\)? of (\d+(?:\.\d+)?) percent', re.I)
+# footnote text of the SOF PDFs is not in this checkout; N25702-01 footnote 1 taken from audit2 (3.0%/yr)
+ESCALATOR_SEED = {'N25702-01': (1, 0.03)}
 
 
 def month_weights(l):
@@ -146,6 +177,18 @@ def month_weights(l):
 
 def is_escalation(billed, expected):
     return expected > 0 and any(abs(billed / expected - (1 + p) ** n) < 0.002 for p in (0.03, 0.05) for n in range(1, 6))
+
+
+def is_line_escalation(diff, hit, esc):
+    """diff == k identical SOF component lines x ((1+p)^y - 1): the footnote escalator hits only some lines (6 x 800 x 3% = 144)."""
+    if not esc or diff <= 0:
+        return False
+    n, p = esc
+    return any(abs(diff - k * m * ((1 + p) ** y - 1)) < 0.011 for m, cnt in hit['comp'].items() for k in range(1, cnt + 1) for y in range(1, 6))
+
+
+def stale_fallback(cited, reason, priced_by):
+    return reason == 'FALLBACK_REVISION' and bool(cited) and cited != MASTER_CONTRACT and ref_key(cited) > ref_key(priced_by)
 
 
 def is_etl(l):
@@ -176,13 +219,14 @@ def judge(billed, expected):
 
 # ---------------- engine ----------------
 def main():
-    book, by_svc, docs = load_prices()
+    book, by_svc, docs, loc_pass, esc = load_prices()
     fx = fx_rates()
     lines = load_lines()
 
     ledger = collections.OrderedDict()   # (svc, currency, month) -> entry
     nrc = collections.OrderedDict()      # svc -> entry
     etl, seen_months, passthrough = [], set(), []
+    fees = collections.OrderedDict()     # (svc, currency, month or '') -> non-SOF fee entry
     credits = collections.defaultdict(float)             # (svc, currency, month) -> credits/adjustments, incl. credit notes
     discounts = collections.defaultdict(float)           # (svc, currency, month) -> separate DISCOUNT lines
     lags = collections.defaultdict(collections.Counter)   # svc -> {invoice month - service month: count}         # early-termination liabilities; (account, invoice month) present in corpus
@@ -206,12 +250,22 @@ def main():
         priced_by, hit, reason = resolve(l['contract_ref'], svc, book, by_svc, docs)
         base = dict(service_id=svc, service_name=l['service_name'], location_id=l['location_id'], account=l['account_number'],
                     currency=l['currency'], cited_contract=l['contract_ref'], priced_by=priced_by, reason=reason, hit=hit)
-        if ct == 'NRC' and PASSTHROUGH.search(l['description'] or ''):
-            passthrough.append(dict(base, invoice_no=l['invoice_no'], billed=amt, fx=rate))
+        desc = l['description'] or ''
+        if ct == 'NRC' and PASSTHROUGH.search(desc):
+            passthrough.append(dict(base, invoice_no=l['invoice_no'], billed=amt, fx=rate, loc_check=False))   # 'Landed Costs - Purchase' splits into duty/VAT/shipping components that exceed the SOF row legitimately
+            continue
+        if ct == 'NRC' and desc.startswith('CPE -') and hit and hit['nrc'] == 0 and not hit['usage']:
+            # INTL_EN prints CPE install NRCs as 'CPE - (svc/ref)'; the SOF prices them only in the location-level Landed Costs row
+            passthrough.append(dict(base, invoice_no=l['invoice_no'], billed=amt, fx=rate, loc_check=True))
             continue
         if ct == 'NRC' and is_etl(l):
             etl.append(dict(base, invoice_no=l['invoice_no'], period_start=l['period_start'], period_end=l['period_end'],
                             billed=amt, fx=rate, description=l['description']))
+            continue
+        if FEE.search(desc):   # REC (TSP) or NRC: keep out of the ledger/NRC cumulation, report as a question
+            for month, w in (month_weights(l) if ct == 'REC' else [('', 1.0)]):
+                fe = fees.setdefault((svc, l['currency'], month), dict(base, month=month, billed=0.0, invoices=set(), descs=set(), fx=rate, ct=ct))
+                fe['billed'] += amt * w; fe['invoices'].add(l['invoice_no']); fe['descs'].add(re.sub(r'\s*\(?\d[\d/-]*\)?$', '', desc)[:50])
             continue
         if ct == 'NRC':
             e = nrc.setdefault(svc, dict(base, billed=0.0, billed_usd=0.0, invoices=[], fx=rate))
@@ -268,15 +322,17 @@ def main():
             else:
                 expected, got = list_exp, billed
             cat = judge(got, expected)
+            if cat != 'OK' and stale_fallback(e['cited_contract'], e['reason'], e['priced_by']):
+                cat = 'CITED_REVISION_NOT_PROVIDED'   # price comes from a revision older than the cited one, which lacks this service
             if cat != 'OK' and (judge(billed, list_exp) == 'OK' or judge(net, list_exp) == 'OK'):
                 cat = 'OK'
             billed_cmp = got
             credit = round(credits.get((svc, cur, month), 0.0), 2)
             if cat == 'OVERBILLED' and credit and judge(got + credit, expected) != 'OVERBILLED':
                 cat = 'REFUNDED'                      # a credit line / credit note for this service-month already fixed it
-            elif cat == 'OVERBILLED' and is_escalation(got, expected):
+            elif cat == 'OVERBILLED' and (is_escalation(got, expected) or is_line_escalation(got - expected, hit, esc.get(e['priced_by']))):
                 cat = 'ESCALATOR_REVIEW'              # matches a 3-5%/yr contractual increase; check the SOF footnote
-            if cat != 'OK':
+            if cat not in ('OK', 'CITED_REVISION_NOT_PROVIDED'):
                 if e['cited_contract'] == MASTER_CONTRACT and not hit['disc']:
                     cat = 'PRICE_BASIS_UNCERTAIN'     # invoice prices off master agreement; SOF list price may not apply
                 elif cat == 'UNDERBILLED' and (e['account'], add_months(month, lag_of(lags, svc))) not in seen_months:
@@ -295,10 +351,15 @@ def main():
         expected = round(hit['nrc'], 2) if hit and not hit['usage'] else None
         if not hit:
             cat = e['reason']
+        elif hit['removed'] and hit['nrc'] == 0 and hit['mrc'] == 0:
+            cat, expected = 'NRC_NO_PRICE', None     # only REMOVED zero rows: 0 is a removal marker, not an install price
         elif expected is None:
             cat = 'USAGE_BASED'
+        elif billed - expected <= loc_pass.get((e['cited_contract'], e['location_id'], e['currency']), 0.0) + max(TOL_ABS, expected * TOL_PCT) \
+                and billed > expected + max(TOL_ABS, expected * TOL_PCT):
+            cat = 'NRC_OK'   # excess is within the SOF location-level Landed Costs / Shipping row (e.g. 91.27 + 40.47 + 0.39 = 132.13)
         elif billed - expected > max(TOL_ABS, expected * TOL_PCT):
-            cat = 'NRC_OVERBILLED'
+            cat = 'CITED_REVISION_NOT_PROVIDED' if stale_fallback(e['cited_contract'], e['reason'], e['priced_by']) else 'NRC_OVERBILLED'
         else:
             cat = 'NRC_OK' if abs(billed - expected) <= max(TOL_ABS, expected * TOL_PCT) else 'NRC_INSTALMENTS_REMAINING'
         rows.append(dict(kind='NRC', service_id=svc, month='', currency=e['currency'], location_id=e['location_id'],
@@ -316,12 +377,25 @@ def main():
                          billed_net=round(t['billed'], 2), credits='', expected=est, discrepancy=None, category='EARLY_TERMINATION',
                          invoices=t['invoice_no'], line_types='NRC', fx_to_usd=t['fx']))
 
+    cpe_loc = collections.defaultdict(float)   # (contract, location, currency) -> CPE/landed NRC billed across all invoices (pairs split by month)
+    for t in passthrough:
+        if t['loc_check']:
+            cpe_loc[(t['cited_contract'], t['location_id'], t['currency'])] += t['billed']
     for t in passthrough:   # F3: landed costs / import VAT / shipping: compare at location level with the SOF, not per service
+        k = (t['cited_contract'], t['location_id'], t['currency'])
+        cap = loc_pass.get(k)
+        cat = 'NRC_PASSTHROUGH_MISMATCH' if t['loc_check'] and cap and cpe_loc[k] > cap + 0.02 else 'NRC_PASSTHROUGH'
         rows.append(dict(kind='NRC', service_id=t['service_id'], month='', currency=t['currency'], location_id=t['location_id'],
                          service_name=t['service_name'], account=t['account'], cited_contract=t['cited_contract'],
                          priced_by=t['priced_by'], billed=round(t['billed'], 2), billed_net=round(t['billed'], 2), credits='',
-                         expected=None, discrepancy=None, category='NRC_PASSTHROUGH', invoices=t['invoice_no'],
-                         line_types='NRC', fx_to_usd=t['fx']))
+                         expected=round(cap, 2) if t['loc_check'] and cap else None, discrepancy=None, category=cat,
+                         invoices=t['invoice_no'], line_types='NRC', fx_to_usd=t['fx']))
+    for (svc, cur, month), t in fees.items():   # non-SOF fees: always a question, never a claim (discrepancy stays blank)
+        rows.append(dict(kind='FEE', service_id=svc, month=month, currency=cur, location_id=t['location_id'],
+                         service_name=t['service_name'] + ' | ' + '; '.join(sorted(t['descs'])), account=t['account'],
+                         cited_contract=t['cited_contract'], priced_by=t['priced_by'], billed=round(t['billed'], 2),
+                         billed_net=round(t['billed'], 2), credits='', expected=None, discrepancy=None, category='FEE_REVIEW',
+                         invoices=' '.join(sorted(t['invoices'])), line_types=t['ct'], fx_to_usd=t['fx']))
     price_drift(rows)
     for r in rows:
         rate = r['fx_to_usd']
@@ -377,6 +451,9 @@ def _selfcheck():
     assert not is_etl(dict(period_start='2026-01-01', period_end='2026-01-31', description='Install'))
     assert is_escalation(9149.96, 9149.96 / 1.03) and not is_escalation(110, 100)
     assert [round(w, 3) for _, w in month_weights(dict(period_start='2025-09-01', period_end='2025-10-31', invoice_date=''))] == [0.5, 0.5]
+    assert ESCALATOR.search('subject to an increase every 1 year(s) of 3.0 percent')[2] == '3.0'
+    assert is_line_escalation(144.0, dict(comp=collections.Counter({800.0: 6})), (1, 0.03)) and not is_line_escalation(100, dict(comp=collections.Counter({800.0: 6})), (1, 0.03))
+    assert FEE.search('Pending Order Change') and FEE.search('Telecommunications Service Priority - Restoration - 1') and not FEE.search('Access - NRC')
     assert judge(100.5, 100) == 'OK' and judge(110, 100) == 'OVERBILLED' and judge(80, 100) == 'UNDERBILLED'
 
 
